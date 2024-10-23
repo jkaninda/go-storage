@@ -1,5 +1,6 @@
 # Go Storage
 A simple Go storage client
+
 Supported storage:
 - Local
 - S3

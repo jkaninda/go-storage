@@ -1,0 +1,12 @@
+/.history
+backup
+data
+compose.yaml
+.env
+test.md
+.DS_Store
+pg-bkup
+/.idea
+bin
+Makefile
+tests

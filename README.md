@@ -6,6 +6,7 @@ Supported storage:
 - S3
 - SSH
 - FTP
+- Azure Blob
 
 ```go
 go get github.com/jkaninda/go-storage
@@ -94,6 +95,31 @@ log.Fatalf("Error copying file, error %v", err)
 	}
 // Download file from ftp remote server
 err = ftpStorage.CopyFrom(finalFileName)
+if err != nil {
+log.Fatalf("Error copying file, error %v", err)
+}
+```
+
+### Azure Blob storage
+
+```go
+azureStorage, err := azure.NewStorage(azure.Config{
+		ContainerName: '',
+		AccountName:   '',
+		AccountKey:    '',
+		RemotePath:    '',
+		LocalPath:     '',
+	})
+	if err != nil {
+		log.Fatal("Error creating Azure Blob storage storage: %s", err)
+	}
+	err = azureStorage.Copy(finalFileName)
+	if err != nil {
+		log.Fatal("Error copying file: %s", err)
+	}
+
+// Download file from Azure Blob remote server
+err = azureStorage.CopyFrom(finalFileName)
 if err != nil {
 log.Fatalf("Error copying file, error %v", err)
 }

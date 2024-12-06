@@ -55,12 +55,12 @@ func createClient(conf Config) (*azblob.Client, error) {
 	// Create the service URL
 	credential, err := azblob.NewSharedKeyCredential(conf.AccountName, conf.AccountKey)
 	if err != nil {
-		log.Fatalf("Failed to create credential: %v", err)
+		return nil, fmt.Errorf("failed to create service URL")
 	}
 	serviceURL := fmt.Sprintf("https://%s.blob.core.windows.net/", conf.AccountName)
 	client, err := azblob.NewClientWithSharedKeyCredential(serviceURL, credential, nil)
 	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+		return nil, fmt.Errorf("failed to create client")
 	}
 	return client, nil
 }

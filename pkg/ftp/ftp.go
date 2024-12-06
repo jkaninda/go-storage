@@ -82,14 +82,24 @@ func NewStorage(conf Config) (pkg.Storage, error) {
 // Copy copies file to the remote server
 func (s ftpStorage) Copy(fileName string) error {
 	ftpClient := s.client
-	defer ftpClient.Quit()
+	defer func(ftpClient *ftp.ServerConn) {
+		err := ftpClient.Quit()
+		if err != nil {
+			return
+		}
+	}(ftpClient)
 
 	filePath := filepath.Join(s.LocalPath, fileName)
 	file, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open file %s: %w", fileName, err)
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			return
+		}
+	}(file)
 
 	remoteFilePath := filepath.Join(s.RemotePath, fileName)
 	err = ftpClient.Stor(remoteFilePath, file)
@@ -104,21 +114,36 @@ func (s ftpStorage) Copy(fileName string) error {
 func (s ftpStorage) CopyFrom(fileName string) error {
 	ftpClient := s.client
 
-	defer ftpClient.Quit()
+	defer func(ftpClient *ftp.ServerConn) {
+		err := ftpClient.Quit()
+		if err != nil {
+			return
+		}
+	}(ftpClient)
 
 	remoteFilePath := filepath.Join(s.RemotePath, fileName)
 	r, err := ftpClient.Retr(remoteFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve file %s: %w", fileName, err)
 	}
-	defer r.Close()
+	defer func(r *ftp.Response) {
+		err := r.Close()
+		if err != nil {
+			return
+		}
+	}(r)
 
 	localFilePath := filepath.Join(s.LocalPath, fileName)
 	outFile, err := os.Create(localFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to create local file %s: %w", fileName, err)
 	}
-	defer outFile.Close()
+	defer func(outFile *os.File) {
+		err := outFile.Close()
+		if err != nil {
+			return
+		}
+	}(outFile)
 
 	_, err = io.Copy(outFile, r)
 	if err != nil {

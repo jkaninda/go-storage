@@ -121,7 +121,12 @@ func (s sshStorage) CopyFrom(fileName string) error {
 	if err != nil {
 		return errors.New("couldn't open the output file")
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			return
+		}
+	}(file)
 
 	err = client.CopyFromRemote(context.Background(), file, filepath.Join(s.RemotePath, fileName))
 

@@ -94,7 +94,12 @@ func (s s3Storage) Copy(fileName string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			return
+		}
+	}(file)
 
 	fileInfo, err := file.Stat()
 	if err != nil {
@@ -102,7 +107,10 @@ func (s s3Storage) Copy(fileName string) error {
 	}
 	objectKey := filepath.Join(s.RemotePath, fileName)
 	buffer := make([]byte, fileInfo.Size())
-	file.Read(buffer)
+	_, err = file.Read(buffer)
+	if err != nil {
+		return err
+	}
 	fileBytes := bytes.NewReader(buffer)
 	fileType := http.DetectContentType(buffer)
 
@@ -126,7 +134,13 @@ func (s s3Storage) CopyFrom(fileName string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			fmt.Printf("Error closing file: %v\n", err)
+			return
+		}
+	}(file)
 
 	objectKey := filepath.Join(s.RemotePath, fileName)
 

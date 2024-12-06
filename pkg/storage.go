@@ -31,8 +31,8 @@ type Storage interface {
 	Name() string
 }
 type Backend struct {
-	//Local Path
+	// Local Path
 	LocalPath string
-	//Remote path or Destination path
+	// Remote path or Destination path
 	RemotePath string
 }

@@ -45,7 +45,12 @@ func createFile(fileName, content string) ([]byte, error) {
 		fmt.Println("Error creating file:", err)
 		return nil, err
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			return
+		}
+	}(file)
 
 	// Write the message to the file
 	_, err = file.WriteString(content)

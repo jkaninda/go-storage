@@ -178,16 +178,16 @@ func (s s3Storage) Prune(retentionDays int) error {
 					Key:    object.Key,
 				})
 				if err != nil {
-					fmt.Printf("failed to delete object %s: %v", *object.Key, err)
+					fmt.Printf("failed to delete object %s: %v\n", *object.Key, err)
 				} else {
-					fmt.Printf("Deleted object %s", *object.Key)
+					fmt.Printf("Deleted object %s\n", *object.Key)
 				}
 			}
 		}
 		return !lastPage
 	})
 	if err != nil {
-		return fmt.Errorf("failed to list objects: %v", err)
+		return fmt.Errorf("failed to list objects: %v\n", err)
 	}
 
 	return nil

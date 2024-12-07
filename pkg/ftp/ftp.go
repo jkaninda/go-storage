@@ -44,14 +44,14 @@ type Config struct {
 	Host       string
 	User       string
 	Password   string
-	Port       string
+	Port       int
 	LocalPath  string
 	RemotePath string
 }
 
 // createClient creates FTP Client
 func createClient(conf Config) (*ftp.ServerConn, error) {
-	ftpClient, err := ftp.Dial(fmt.Sprintf("%s:%s", conf.Host, conf.Port), ftp.DialWithTimeout(5*time.Second))
+	ftpClient, err := ftp.Dial(fmt.Sprintf("%s:%d", conf.Host, conf.Port), ftp.DialWithTimeout(5*time.Second))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to FTP: %w", err)
 	}

@@ -56,7 +56,7 @@ if err != nil {
 ```go
 sshStorage, err := ssh.NewStorage(ssh.Config{
 		Host:       "",
-		Port:       "",
+		Port:       22,
 		User:       "",
 		Password:   "",
 		RemotePath: "",
@@ -80,7 +80,7 @@ log.Fatalf("Error copying file, error %v", err)
 ```go
 	ftpStorage, err := ftp.NewStorage(ftp.Config{
 		Host:       "",
-		Port:       "",
+		Port:       22,
 		User:       "",
 		Password:   "",
 		RemotePath: "",

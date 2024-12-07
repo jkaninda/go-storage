@@ -46,7 +46,7 @@ type Config struct {
 	Host         string
 	User         string
 	Password     string
-	Port         string
+	Port         int
 	IdentifyFile string
 	LocalPath    string
 	RemotePath   string
@@ -54,15 +54,15 @@ type Config struct {
 
 // createClient creates SSH Client
 func createClient(conf Config) (scp.Client, error) {
-	if _, err := os.Stat(conf.IdentifyFile); os.IsNotExist(err) {
+	if _, err := os.Stat(conf.IdentifyFile); !os.IsNotExist(err) {
 		clientConfig, err := auth.PrivateKey(conf.User, conf.IdentifyFile, ssh.InsecureIgnoreHostKey())
-		return scp.NewClient(fmt.Sprintf("%s:%s", conf.Host, conf.Port), &clientConfig), err
+		return scp.NewClient(fmt.Sprintf("%s:%d", conf.Host, conf.Port), &clientConfig), err
 	} else {
 		if conf.Password == "" {
 			return scp.Client{}, errors.New("ssh password required")
 		}
 		clientConfig, err := auth.PasswordKey(conf.User, conf.Password, ssh.InsecureIgnoreHostKey())
-		return scp.NewClient(fmt.Sprintf("%s:%s", conf.Host, conf.Port), &clientConfig), err
+		return scp.NewClient(fmt.Sprintf("%s:%d", conf.Host, conf.Port), &clientConfig), err
 
 	}
 }

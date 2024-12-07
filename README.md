@@ -80,7 +80,7 @@ log.Fatalf("Error copying file, error %v", err)
 ```go
 	ftpStorage, err := ftp.NewStorage(ftp.Config{
 		Host:       "",
-		Port:       22,
+		Port:       21,
 		User:       "",
 		Password:   "",
 		RemotePath: "",

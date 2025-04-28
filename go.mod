@@ -4,7 +4,7 @@ go 1.22.0
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.5.0
-	github.com/aws/aws-sdk-go v1.55.6
+	github.com/aws/aws-sdk-go v1.55.7
 	github.com/bramvdbogaerde/go-scp v1.5.0
 	github.com/jlaffaye/ftp v0.2.0
 	golang.org/x/crypto v0.31.0

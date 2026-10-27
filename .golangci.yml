@@ -32,6 +32,10 @@ linters:
           - dupl
           - lll
         path: /*
+      # Legacy v0.1 API: deprecated as a whole and frozen.
+      - linters:
+          - staticcheck
+        path: ^pkg/
     paths:
       - third_party$
       - builtin$

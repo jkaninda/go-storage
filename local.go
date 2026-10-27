@@ -1,343 +1,428 @@
+/*
+MIT License
+
+Copyright (c) 2024 Jonas Kaninda
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 package go_storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // LocalStorage implements the Storage interface using the local filesystem.
-// It is safe for concurrent use as it relies on filesystem operations which
-// are handled by the OS.
+// It is safe for concurrent use.
 type LocalStorage struct {
 	basePath string
 }
+
+// Lock tuning for PutIf / Put on the local backend.
+const (
+	localLockTimeout = 10 * time.Second
+	localLockRetry   = 10 * time.Millisecond
+	// A lock older than this is considered stale (the holder crashed). The
+	// lock is only held around a stat + rename, never while streaming data.
+	localLockStale = 30 * time.Second
+)
 
 // NewLocalStorage creates a new LocalStorage instance with the given base directory.
 // The base directory will be created if it doesn't exist.
 func NewLocalStorage(basePath string) (*LocalStorage, error) {
 	absPath, err := filepath.Abs(basePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
+		return nil, fmt.Errorf("local: failed to resolve absolute path: %w", err)
 	}
 
-	if err := os.MkdirAll(absPath, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create base directory: %w", err)
+	if err := os.MkdirAll(absPath, 0o755); err != nil {
+		return nil, fmt.Errorf("local: failed to create base directory: %w", err)
 	}
 
-	return &LocalStorage{
-		basePath: absPath,
-	}, nil
+	return &LocalStorage{basePath: absPath}, nil
 }
 
-// resolvePath safely resolves a remote path to an absolute local path,
-// ensuring it stays within the base directory.
+// resolvePath safely resolves a key to an absolute local path, ensuring it
+// stays within the base directory.
 func (s *LocalStorage) resolvePath(remotePath string) (string, error) {
-	// Clean the path to remove any .. or . components
-	cleanPath := filepath.Clean(remotePath)
-
-	// Remove leading slashes to make it relative
-	cleanPath = strings.TrimPrefix(cleanPath, string(filepath.Separator))
-
-	// Join with base path
-	fullPath := filepath.Join(s.basePath, cleanPath)
-
-	// Verify the resolved path is still within basePath
-	if !strings.HasPrefix(fullPath, s.basePath) {
-		return "", fmt.Errorf("path traversal attempt detected: %s", remotePath)
+	key, err := cleanKey(remotePath)
+	if err != nil {
+		return "", fmt.Errorf("local: %w", err)
 	}
+	return s.join(key)
+}
 
+func (s *LocalStorage) join(key string) (string, error) {
+	fullPath := filepath.Join(s.basePath, filepath.FromSlash(key))
+	rel, err := filepath.Rel(s.basePath, fullPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("local: path traversal attempt detected: %s", key)
+	}
 	return fullPath, nil
+}
+
+// localETag derives the version token from mtime and size.
+func localETag(fi fs.FileInfo) string {
+	return strconv.FormatInt(fi.ModTime().UnixNano(), 16) + "-" + strconv.FormatInt(fi.Size(), 16)
+}
+
+func (s *LocalStorage) item(full string, fi fs.FileInfo) Item {
+	rel, err := filepath.Rel(s.basePath, full)
+	if err != nil {
+		rel = full
+	}
+	it := Item{
+		Key:          filepath.ToSlash(rel),
+		ModifiedTime: fi.ModTime(),
+		IsDirectory:  fi.IsDir(),
+	}
+	if !fi.IsDir() {
+		it.Size = fi.Size()
+		it.ETag = localETag(fi)
+	}
+	return it
 }
 
 // Upload uploads a local file to the storage with the given target name.
 func (s *LocalStorage) Upload(ctx context.Context, localPath string, remotePath string) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	targetPath, err := s.resolvePath(remotePath)
-	if err != nil {
-		return err
-	}
-
-	// Open source file
-	srcFile, err := os.Open(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to open source file: %w", err)
-	}
-	defer srcFile.Close()
-
-	// Create parent directories if needed
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-		return fmt.Errorf("failed to create parent directories: %w", err)
-	}
-
-	// Create destination file
-	dstFile, err := os.Create(targetPath)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file: %w", err)
-	}
-	defer dstFile.Close()
-
-	// Copy with context cancellation checks
-	buf := make([]byte, 32*1024) // 32KB buffer
-	for {
-		select {
-		case <-ctx.Done():
-			// Clean up partial file on cancellation
-			os.Remove(targetPath)
-			return ctx.Err()
-		default:
-		}
-
-		n, readErr := srcFile.Read(buf)
-		if n > 0 {
-			if _, writeErr := dstFile.Write(buf[:n]); writeErr != nil {
-				os.Remove(targetPath)
-				return fmt.Errorf("failed to write to destination: %w", writeErr)
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			os.Remove(targetPath)
-			return fmt.Errorf("failed to read source file: %w", readErr)
-		}
-	}
-
-	return nil
+	return uploadFile(ctx, s, localPath, remotePath)
 }
 
 // Download downloads a file from storage to a local path.
 func (s *LocalStorage) Download(ctx context.Context, remotePath string, localPath string) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	sourcePath, err := s.resolvePath(remotePath)
-	if err != nil {
-		return err
-	}
-
-	// Open source file
-	srcFile, err := os.Open(sourcePath)
-	if err != nil {
-		return fmt.Errorf("failed to open remote file: %w", err)
-	}
-	defer srcFile.Close()
-
-	// Create parent directories for local path if needed
-	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
-		return fmt.Errorf("failed to create local parent directories: %w", err)
-	}
-
-	// Create destination file
-	dstFile, err := os.Create(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to create local file: %w", err)
-	}
-	defer dstFile.Close()
-
-	// Copy with context cancellation checks
-	buf := make([]byte, 32*1024) // 32KB buffer
-	for {
-		select {
-		case <-ctx.Done():
-			// Clean up partial file on cancellation
-			os.Remove(localPath)
-			return ctx.Err()
-		default:
-		}
-
-		n, readErr := srcFile.Read(buf)
-		if n > 0 {
-			if _, writeErr := dstFile.Write(buf[:n]); writeErr != nil {
-				os.Remove(localPath)
-				return fmt.Errorf("failed to write to local file: %w", writeErr)
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			os.Remove(localPath)
-			return fmt.Errorf("failed to read remote file: %w", readErr)
-		}
-	}
-
-	return nil
+	return downloadFile(ctx, s, remotePath, localPath)
 }
 
-// List returns all items in the storage that match the given prefix.
-func (s *LocalStorage) List(ctx context.Context, prefix string) ([]Item, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
+// writeTemp streams r into a new temporary file next to full and returns its path.
+func writeTemp(ctx context.Context, full string, r io.Reader) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return "", fmt.Errorf("local: failed to create parent directories: %w", err)
 	}
-
-	var items []Item
-
-	// Clean and resolve the prefix path
-	searchPath := s.basePath
-	cleanPrefix := strings.TrimPrefix(filepath.Clean(prefix), string(filepath.Separator))
-
-	if cleanPrefix != "" && cleanPrefix != "." {
-		searchPath = filepath.Join(s.basePath, cleanPrefix)
-	}
-
-	// Check if the search path exists
-	info, err := os.Stat(searchPath)
-	if os.IsNotExist(err) {
-		// If the exact path doesn't exist, try to find files with this prefix
-		// by walking the parent directory
-		parentDir := filepath.Dir(searchPath)
-		baseName := filepath.Base(searchPath)
-
-		if _, err := os.Stat(parentDir); os.IsNotExist(err) {
-			return items, nil // Return empty list if parent doesn't exist
-		}
-
-		entries, err := os.ReadDir(parentDir)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read directory: %w", err)
-		}
-
-		for _, entry := range entries {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			default:
-			}
-
-			if strings.HasPrefix(entry.Name(), baseName) {
-				fullPath := filepath.Join(parentDir, entry.Name())
-				item, err := s.fileInfoToItem(fullPath)
-				if err != nil {
-					continue // Skip files we can't stat
-				}
-				items = append(items, item)
-			}
-		}
-		return items, nil
-	}
-
+	tmp := partialName(full)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("failed to stat path: %w", err)
+		return "", fmt.Errorf("local: failed to create temporary file: %w", err)
 	}
-
-	// If it's a file, return just that file
-	if !info.IsDir() {
-		item, err := s.fileInfoToItem(searchPath)
-		if err != nil {
-			return nil, err
-		}
-		return []Item{item}, nil
+	_, err = io.Copy(f, ctxReader{ctx: ctx, r: r})
+	if err == nil {
+		err = f.Sync()
 	}
-
-	// Walk the directory
-	err = filepath.WalkDir(searchPath, func(path string, d os.DirEntry, err error) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		if err != nil {
-			return nil // Skip entries with errors
-		}
-
-		item, err := s.fileInfoToItem(path)
-		if err != nil {
-			return nil // Skip files we can't stat
-		}
-		items = append(items, item)
-		return nil
-	})
-
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to walk directory: %w", err)
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("local: failed to write data: %w", err)
 	}
-
-	return items, nil
+	return tmp, nil
 }
 
-// fileInfoToItem converts a file path to an Item.
-func (s *LocalStorage) fileInfoToItem(path string) (Item, error) {
-	info, err := os.Stat(path)
+// Put streams r to key via a temporary file that is renamed on success.
+func (s *LocalStorage) Put(ctx context.Context, key string, r io.Reader, _ *PutOptions) (Item, error) {
+	return s.put(ctx, key, r, nil)
+}
+
+// PutIf writes r to key only if cond holds. It uses an exclusive lock file
+// (<key>.lock) so it is atomic with respect to other PutIf/Put calls on the
+// same filesystem.
+func (s *LocalStorage) PutIf(ctx context.Context, key string, r io.Reader, cond Condition, _ *PutOptions) (Item, error) {
+	if err := validateCondition(cond); err != nil {
+		return Item{}, fmt.Errorf("local: %w", err)
+	}
+	return s.put(ctx, key, r, &cond)
+}
+
+func (s *LocalStorage) put(ctx context.Context, key string, r io.Reader, cond *Condition) (Item, error) {
+	full, err := s.resolvePath(key)
 	if err != nil {
 		return Item{}, err
 	}
-
-	// Get relative path from base
-	relPath, err := filepath.Rel(s.basePath, path)
+	tmp, err := writeTemp(ctx, full, r)
 	if err != nil {
-		relPath = path
+		return Item{}, err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmp)
+		}
+	}()
 
-	// Normalize to forward slashes for consistency
-	relPath = filepath.ToSlash(relPath)
-
-	size := info.Size()
-	if info.IsDir() {
-		size = 0
+	unlock, err := acquireLock(ctx, full+".lock")
+	if err != nil {
+		return Item{}, err
 	}
+	defer unlock()
 
-	return Item{
-		Key:          relPath,
-		ModifiedTime: info.ModTime(),
-		Size:         size,
-		IsDirectory:  info.IsDir(),
-	}, nil
+	cur, statErr := os.Stat(full)
+	exists := statErr == nil
+	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		return Item{}, fmt.Errorf("local: failed to stat %s: %w", key, statErr)
+	}
+	if cond != nil {
+		switch {
+		case cond.IfNoneMatch && exists:
+			return Item{}, fmt.Errorf("local: %s already exists: %w", key, ErrPreconditionFailed)
+		case cond.IfMatch != "" && (!exists || localETag(cur) != cond.IfMatch):
+			return Item{}, fmt.Errorf("local: %s etag mismatch: %w", key, ErrPreconditionFailed)
+		}
+	}
+	if exists {
+		if err := bumpMtime(tmp, cur.ModTime()); err != nil {
+			return Item{}, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Item{}, err
+	}
+	if err := os.Rename(tmp, full); err != nil {
+		return Item{}, fmt.Errorf("local: failed to rename temporary file: %w", err)
+	}
+	committed = true
+	fi, err := os.Stat(full)
+	if err != nil {
+		return Item{}, fmt.Errorf("local: failed to stat %s: %w", key, err)
+	}
+	return s.item(full, fi), nil
 }
 
-// Remove deletes a file from storage.
-func (s *LocalStorage) Remove(ctx context.Context, remotePath string) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
+// bumpMtime makes sure the mtime of tmp is strictly after prev so that the
+// ETag changes even on filesystems with coarse timestamps.
+func bumpMtime(tmp string, prev time.Time) error {
+	for _, step := range []time.Duration{time.Microsecond, time.Millisecond, time.Second, 2 * time.Second} {
+		fi, err := os.Stat(tmp)
+		if err != nil {
+			return fmt.Errorf("local: failed to stat temporary file: %w", err)
+		}
+		if fi.ModTime().After(prev) {
+			return nil
+		}
+		t := prev.Add(step)
+		if err := os.Chtimes(tmp, t, t); err != nil {
+			return fmt.Errorf("local: failed to set mtime: %w", err)
+		}
+	}
+	return nil
+}
+
+// acquireLock creates lockPath exclusively, retrying until localLockTimeout.
+func acquireLock(ctx context.Context, lockPath string) (func(), error) {
+	deadline := time.Now().Add(localLockTimeout)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+			_ = f.Close()
+			return func() { _ = os.Remove(lockPath) }, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("local: failed to create lock %s: %w", lockPath, err)
+		}
+		if fi, serr := os.Stat(lockPath); serr == nil && time.Since(fi.ModTime()) > localLockStale {
+			_ = os.Remove(lockPath)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("local: timed out waiting for lock %s", lockPath)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(localLockRetry):
+		}
+	}
+}
+
+// Get opens key for reading.
+func (s *LocalStorage) Get(ctx context.Context, key string) (io.ReadCloser, Item, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, Item{}, err
+	}
+	full, err := s.resolvePath(key)
+	if err != nil {
+		return nil, Item{}, err
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return nil, Item{}, mapLocalErr(key, err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, Item{}, mapLocalErr(key, err)
+	}
+	if fi.IsDir() {
+		_ = f.Close()
+		return nil, Item{}, fmt.Errorf("local: %s is a directory", key)
+	}
+	return f, s.item(full, fi), nil
+}
+
+// Stat returns metadata for key.
+func (s *LocalStorage) Stat(ctx context.Context, key string) (Item, error) {
+	if err := ctx.Err(); err != nil {
+		return Item{}, err
+	}
+	full, err := s.resolvePath(key)
+	if err != nil {
+		return Item{}, err
+	}
+	fi, err := os.Stat(full)
+	if err != nil {
+		return Item{}, mapLocalErr(key, err)
+	}
+	return s.item(full, fi), nil
+}
+
+func mapLocalErr(key string, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("local: %s: %w", key, ErrNotFound)
+	}
+	return fmt.Errorf("local: %s: %w", key, err)
+}
+
+// ListDir lists the files directly inside dir.
+func (s *LocalStorage) ListDir(ctx context.Context, dir string) ([]Item, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	d, err := cleanDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("local: %w", err)
+	}
+	full, err := s.join(d)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(full)
+	if errors.Is(err, fs.ErrNotExist) {
+		return []Item{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("local: failed to read directory %s: %w", dir, err)
+	}
+	items := make([]Item, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		items = append(items, s.item(filepath.Join(full, e.Name()), fi))
+	}
+	return items, nil
+}
+
+// List returns all items (files and directories, recursively) whose key
+// starts with prefix.
+func (s *LocalStorage) List(ctx context.Context, prefix string) ([]Item, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p, err := cleanPrefix(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("local: %w", err)
 	}
 
+	// Walk from the deepest directory fully contained in the prefix.
+	root := s.basePath
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		root = filepath.Join(s.basePath, filepath.FromSlash(p[:i]))
+	}
+	items := make([]Item, 0)
+	err = filepath.WalkDir(root, func(full string, d fs.DirEntry, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		if err != nil {
+			if full == root && errors.Is(err, fs.ErrNotExist) {
+				return fs.SkipAll
+			}
+			return nil // skip unreadable entries
+		}
+		if full == s.basePath {
+			return nil
+		}
+		rel, rerr := filepath.Rel(s.basePath, full)
+		if rerr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if !strings.HasPrefix(rel, p) {
+			// Prune directories that cannot contain matches.
+			if d.IsDir() && !strings.HasPrefix(p, rel+"/") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		fi, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		items = append(items, s.item(full, fi))
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("local: failed to walk directory: %w", err)
+	}
+	return items, nil
+}
+
+// Remove deletes a file (or directory tree) from storage.
+func (s *LocalStorage) Remove(ctx context.Context, remotePath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	targetPath, err := s.resolvePath(remotePath)
 	if err != nil {
 		return err
 	}
-
-	// Check if file exists
 	info, err := os.Stat(targetPath)
-	if os.IsNotExist(err) {
-		return fmt.Errorf("file not found: %s", remotePath)
+	if err != nil {
+		return mapLocalErr(remotePath, err)
+	}
+	if info.IsDir() {
+		err = os.RemoveAll(targetPath)
+	} else {
+		err = os.Remove(targetPath)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to stat file: %w", err)
+		return mapLocalErr(remotePath, err)
 	}
-
-	// Remove file or directory
-	if info.IsDir() {
-		if err := os.RemoveAll(targetPath); err != nil {
-			return fmt.Errorf("failed to remove directory: %w", err)
-		}
-	} else {
-		if err := os.Remove(targetPath); err != nil {
-			return fmt.Errorf("failed to remove file: %w", err)
-		}
-	}
-
 	return nil
 }
 
-// Close releases any resources held by the storage implementation.
-// For LocalStorage, this is a no-op as there are no persistent resources.
+// Close releases any resources held by the storage implementation (no-op).
 func (s *LocalStorage) Close() error {
 	return nil
 }

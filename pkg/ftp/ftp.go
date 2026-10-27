@@ -22,6 +22,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+// Package ftp is the legacy v0.1 API of go-storage.
+//
+// Deprecated: use the root package github.com/jkaninda/go-storage
+// (NewStorage and the streaming Storage interface) instead.
 package ftp
 
 import (
